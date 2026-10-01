@@ -1,65 +1,113 @@
-# Наименование конвейера, отображаемое в интерфейсе GitHub Actions
-name: Build, Test and Publish
+name: Build, Test, Publish and Docker
 
-# События, при наступлении которых конвейер запускается
 on:
   push:
     branches: [ main ]
+    tags: [ 'v*' ] # Триггер для Releases (пункт 51)
   pull_request:
     branches: [ main ]
-  workflow_dispatch:      # позволяет запускать конвейер вручную
+  workflow_dispatch:
 
 jobs:
-  build:
-    # Наименование задания формируется с указанием операционной системы
-    name: Сборка под управлением ${{ matrix.os }}
+  build-and-test:
+    name: Сборка и тесты (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-
     strategy:
-      # Отказ одного задания не прекращает выполнение остальных
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
 
     steps:
-      # Шаг 1. Получение исходного кода из репозитория
-      - name: Получение исходного кода
-        uses: actions/checkout@v4
-
-      # Шаг 2. Установка пакета средств разработки .NET
-      - name: Установка .NET SDK
+      - uses: actions/checkout@v4
+      
+      - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
-
-      # Шаг 3. Кэширование пакетов NuGet для сокращения времени сборки
-      - name: Кэширование пакетов NuGet
-        uses: actions/cache@v4
-        with:
-          path: ~/.nuget/packages
-          key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj') }}
-          restore-keys: ${{ runner.os }}-nuget-
-
-      # Шаг 4. Восстановление зависимостей решения
-      - name: Восстановление зависимостей
+      
+      - name: Restore
         run: dotnet restore
-
-      # Шаг 5. Сборка решения в конфигурации Release
-      - name: Сборка решения
+      
+      - name: Build
         run: dotnet build --configuration Release --no-restore
-
-      # Шаг 6. Выполнение модульных тестов
-      - name: Выполнение модульных тестов
-        run: dotnet test --configuration Release --no-build --verbosity normal
-
-      # Шаг 7. Публикация Web-приложения
-      - name: Публикация приложения
-        run: dotnet publish TranslationBureau.Web --configuration Release --no-build --output ./publish
-
-      # Шаг 8. Сохранение результата публикации в качестве артефакта
-      - name: Сохранение артефакта сборки
+      
+      # Пункт 49: Тесты с покрытием кода
+      - name: Test with Coverage
+        run: dotnet test --configuration Release --no-build --verbosity normal /p:CollectCoverage=true /p:CoverletOutputFormat=cobertura /p:CoverletOutput=./TestResults/Coverage/
+      
+      # Пункт 49: Публикация отчета о покрытии (для Ubuntu)
+      - name: Upload coverage report
+        if: matrix.os == 'ubuntu-latest'
         uses: actions/upload-artifact@v4
         with:
-          name: TranslationBureau-${{ matrix.os }}
-          path: ./publish/**
-          retention-days: 30
+          name: code-coverage-report
+          path: TranslationBureau.Tests/TestResults/Coverage/coverage.cobertura.xml
+          retention-days: 7
+
+      # Пункт 50: Самодостаточная публикация для Windows
+      - name: Publish Self-Contained (win-x64)
+        if: matrix.os == 'windows-latest'
+        run: dotnet publish TranslationBureau.Web --configuration Release --runtime win-x64 --self-contained true --output ./publish-win-x64
+      
+      # Пункт 50: Самодостаточная публикация для Linux
+      - name: Publish Self-Contained (linux-x64)
+        if: matrix.os == 'ubuntu-latest'
+        run: dotnet publish TranslationBureau.Web --configuration Release --runtime linux-x64 --self-contained true --output ./publish-linux-x64
+
+      # Сохранение артефактов
+      - name: Upload Win Artifact
+        if: matrix.os == 'windows-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-win-x64-self-contained
+          path: ./publish-win-x64/**
+          
+      - name: Upload Linux Artifact
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-linux-x64-self-contained
+          path: ./publish-linux-x64/**
+
+  # Пункт 52: Сборка Docker образа (только на Ubuntu)
+  docker-build:
+    name: Build Docker Image
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' # Не собираем докер для PR
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Build Docker image
+        run: |
+          docker build -t translation-bureau:${{ github.sha }} .
+          docker save translation-bureau:${{ github.sha }} -o image.tar
+      
+      - name: Upload Docker image
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image
+          path: image.tar
+          retention-days: 1
+
+  # Пункт 51: Создание Release при теге v*
+  create-release:
+    name: Create Release
+    needs: [build-and-test, docker-build]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        
+      - name: Create Release
+        id: create_release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            app-win-x64-self-contained/*
+            app-linux-x64-self-contained/*
+            docker-image/image.tar
+          generate_release_notes: true
