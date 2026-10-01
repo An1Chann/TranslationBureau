@@ -41,7 +41,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: code-coverage-report
-          path: TranslationBureau.Tests/TestResults/Coverage/coverage.cobertura.xml
+          path: '**/coverage.cobertura.xml'
           retention-days: 7
 
       # Пункт 50: Самодостаточная публикация для Windows
